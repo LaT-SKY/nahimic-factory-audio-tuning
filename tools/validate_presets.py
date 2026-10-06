@@ -23,7 +23,8 @@ import os
 import sys
 from collections import OrderedDict
 
-EE = os.path.expanduser("~/.var/app/com.github.wwmm.easyeffects/data/easyeffects")
+EE = os.environ.get("EASYEFFECTS_DATA",
+                      os.path.expanduser("~/.var/app/com.github.wwmm.easyeffects/data/easyeffects"))
 IRS = os.path.join(EE, "irs")
 OUT = os.path.join(EE, "output")
 IN = os.path.join(EE, "input")
@@ -50,6 +51,58 @@ NS_LEVELS = {"Low", "Moderate", "High", "VeryHigh"}
 FILTER_SLOPES = {"Off", "12 dB/oct", "24 dB/oct", "36 dB/oct"}
 COMP_SC_TYPES = {"Feed-forward", "Feed-back", "External", "Link"}
 GATE_SC_TYPES = {"Internal", "External", "Link"}
+
+# --- v8.3.0 新增：空间效果插件 ---------------------------------------------
+# 键名取自上游序列化代码（不是 kcfg 的 camelCase，也不是运行态 .rc）：
+#   src/stereo_tools_preset.cpp        （Calf LV2 StereoTools）
+#   src/crosstalk_canceller_preset.cpp （EE 原生）
+# 写错的键会被 EasyEffects 静默忽略 —— 见 reverse-engineering-notes.md 陷阱 1。
+STEREO_TOOLS_KEYS = {
+    "bypass", "input-gain", "output-gain", "balance-in", "balance-out",
+    "softclip", "mutel", "muter", "phasel", "phaser", "mode",
+    "side-level", "side-balance", "middle-level", "middle-panorama",
+    "stereo-base", "delay", "sc-level", "stereo-phase", "dry", "wet",
+}
+# kcfg modeLabels（&gt; 解码后）
+STEREO_TOOLS_MODES = {
+    "LR > LR (Stereo Default)", "LR > MS (Stereo to Mid-Side)",
+    "MS > LR (Mid-Side to Stereo)", "LR > LL (Mono Left Channel)",
+    "LR > RR (Mono Right Channel)", "LR > L+R (Mono Sum L+R)",
+    "LR > RL (Stereo Flip Channels)",
+}
+CROSSTALK_KEYS = {"bypass", "input-gain", "output-gain",
+                  "phantom-center-only", "delay-us", "decay-db"}
+
+# --- 补齐：此前 37 个插件块从未被校验（validate 会静默放行）----------------
+BASS_ENHANCER_KEYS = {"bypass", "input-gain", "output-gain", "amount",
+                      "harmonics", "scope", "floor", "blend", "floor-active"}
+LIMITER_KEYS = {"mode", "oversampling", "dithering", "sidechain-type", "bypass",
+                "input-gain", "output-gain", "lookahead", "attack", "release",
+                "threshold", "sidechain-preamp", "stereo-link", "alr-attack",
+                "alr-release", "alr-knee", "alr-knee-smooth", "alr", "gain-boost",
+                "input-to-sidechain", "input-to-link", "sidechain-to-input",
+                "sidechain-to-link", "link-to-input", "link-to-sidechain"}
+DEEPFILTERNET_KEYS = {"bypass", "input-gain", "output-gain", "attenuation-limit",
+                      "min-processing-threshold", "max-erb-processing-threshold",
+                      "max-df-processing-threshold", "min-processing-buffer",
+                      "post-filter-beta"}
+
+LIMITER_MODES = {"Herm Thin", "Herm Wide", "Herm Tail", "Herm Duck",
+                 "Exp Thin", "Exp Wide", "Exp Tail", "Exp Duck",
+                 "Line Thin", "Line Wide", "Line Tail", "Line Duck"}
+LIMITER_DITHERING = {"None", "7bit", "8bit", "11bit", "12bit", "15bit", "16bit",
+                     "23bit", "24bit"}
+LIMITER_SIDECHAIN = {"Internal", "External", "Link"}
+LIMITER_OVERSAMPLING = (
+    {"None"} |
+    {"%s x%d/%s" % (fam, n, bits)
+     for fam in ("Half", "Full") for n in (2, 3, 4, 6, 8) for bits in ("16 bit", "24 bit")} |
+    {"True Peak/16 bit", "True Peak/24 bit"})
+
+HANDLED_PLUGINS = {"equalizer", "multiband_compressor", "convolver", "loudness",
+                   "reverb", "echo_canceller", "gate", "crossfeed", "compressor",
+                   "stereo_tools", "crosstalk_canceller",
+                   "bass_enhancer", "limiter", "deepfilternet"}
 
 errs = []
 checked = 0
@@ -112,6 +165,93 @@ def check_convolver(name, cv):
             "%s: sofa keys %s" % (name, sorted(sofa)))
 
 
+def check_keyset(name, pid, cfg, allowed):
+    """键集必须**完全一致** —— 多一个、少一个都算错。
+
+    返回 False 时调用方应**直接返回**，否则后续按名取值会 KeyError
+    （自检时踩到过：把 `stereo-base` 拼成 `stereo-bass` 会让校验器自己崩掉）。
+    """
+    got = set(cfg)
+    missing = allowed - got
+    extra = got - allowed
+    chk(not missing, "%s: %s 缺少键 %s" % (name, pid, sorted(missing)))
+    chk(not extra, "%s: %s 出现未定义键 %s" % (name, pid, sorted(extra)))
+    return not missing and not extra
+
+
+def check_stereo_tools(name, cfg):
+    if not check_keyset(name, "stereo_tools", cfg, STEREO_TOOLS_KEYS):
+        return
+    chk(cfg["mode"] in STEREO_TOOLS_MODES, "%s: stereo_tools mode %r illegal" % (name, cfg["mode"]))
+    chk(-36.0 <= cfg["input-gain"] <= 36.0, "%s: stereo_tools input-gain 越界" % name)
+    chk(-36.0 <= cfg["output-gain"] <= 36.0, "%s: stereo_tools output-gain 越界" % name)
+    chk(-1.0 <= cfg["balance-in"] <= 1.0, "%s: stereo_tools balance-in 越界" % name)
+    chk(-1.0 <= cfg["balance-out"] <= 1.0, "%s: stereo_tools balance-out 越界" % name)
+    chk(-1.0 <= cfg["stereo-base"] <= 1.0, "%s: stereo_tools stereo-base 越界" % name)
+    chk(-36.0 <= cfg["side-level"] <= 36.0, "%s: stereo_tools side-level 越界" % name)
+    chk(-1.0 <= cfg["side-balance"] <= 1.0, "%s: stereo_tools side-balance 越界" % name)
+    chk(-36.0 <= cfg["middle-level"] <= 36.0, "%s: stereo_tools middle-level 越界" % name)
+    chk(-1.0 <= cfg["middle-panorama"] <= 1.0, "%s: stereo_tools middle-panorama 越界" % name)
+    chk(-20.0 <= cfg["delay"] <= 20.0, "%s: stereo_tools delay 越界" % name)
+    chk(1.0 <= cfg["sc-level"] <= 100.0, "%s: stereo_tools sc-level 越界" % name)
+    chk(0.0 <= cfg["stereo-phase"] <= 360.0, "%s: stereo_tools stereo-phase 越界" % name)
+    chk(-100.0 <= cfg["dry"] <= 20.0, "%s: stereo_tools dry 越界" % name)
+    chk(-100.0 <= cfg["wet"] <= 20.0, "%s: stereo_tools wet 越界" % name)
+
+
+def check_crosstalk_canceller(name, cfg):
+    if not check_keyset(name, "crosstalk_canceller", cfg, CROSSTALK_KEYS):
+        return
+    chk(-36.0 <= cfg["input-gain"] <= 36.0, "%s: crosstalk input-gain 越界" % name)
+    chk(-36.0 <= cfg["output-gain"] <= 36.0, "%s: crosstalk output-gain 越界" % name)
+    chk(200.0 <= cfg["delay-us"] <= 500.0, "%s: crosstalk delay-us 越界" % name)
+    chk(-6.0 <= cfg["decay-db"] <= 0.0, "%s: crosstalk decay-db 越界" % name)
+
+
+def check_bass_enhancer(name, cfg):
+    if not check_keyset(name, "bass_enhancer", cfg, BASS_ENHANCER_KEYS):
+        return
+    for k, lo, hi in (("input-gain", -36, 36), ("output-gain", -36, 36),
+                      ("amount", -100, 36), ("harmonics", 0.1, 10),
+                      ("scope", 10, 250), ("floor", 10, 120), ("blend", -10, 10)):
+        chk(lo <= cfg[k] <= hi, "%s: bass_enhancer %s=%r 越界 [%g,%g]" % (name, k, cfg[k], lo, hi))
+
+
+def check_limiter(name, cfg):
+    if not check_keyset(name, "limiter", cfg, LIMITER_KEYS):
+        return
+    chk(cfg["mode"] in LIMITER_MODES, "%s: limiter mode %r illegal" % (name, cfg["mode"]))
+    chk(cfg["oversampling"] in LIMITER_OVERSAMPLING,
+        "%s: limiter oversampling %r illegal" % (name, cfg["oversampling"]))
+    chk(cfg["dithering"] in LIMITER_DITHERING,
+        "%s: limiter dithering %r illegal" % (name, cfg["dithering"]))
+    chk(cfg["sidechain-type"] in LIMITER_SIDECHAIN,
+        "%s: limiter sidechain-type %r illegal" % (name, cfg["sidechain-type"]))
+    for k, lo, hi in (("input-gain", -36, 36), ("output-gain", -36, 36),
+                      ("lookahead", 0.1, 20), ("attack", 0.25, 20),
+                      ("release", 0.25, 20), ("threshold", -48, 0),
+                      ("sidechain-preamp", -80.01, 40), ("stereo-link", 0, 100),
+                      ("alr-attack", 0.10, 200), ("alr-release", 10, 1000),
+                      ("alr-knee", -12, 12), ("alr-knee-smooth", -48, 0),
+                      ("input-to-sidechain", -80.01, 40), ("input-to-link", -80.01, 40),
+                      ("sidechain-to-input", -80.01, 40), ("sidechain-to-link", -80.01, 40),
+                      ("link-to-input", -80.01, 40), ("link-to-sidechain", -80.01, 40)):
+        chk(lo <= cfg[k] <= hi, "%s: limiter %s=%r 越界 [%g,%g]" % (name, k, cfg[k], lo, hi))
+
+
+def check_deepfilternet(name, cfg):
+    if not check_keyset(name, "deepfilternet", cfg, DEEPFILTERNET_KEYS):
+        return
+    for k, lo, hi in (("input-gain", -36, 36), ("output-gain", -36, 36),
+                      ("attenuation-limit", 0, 100),
+                      ("min-processing-threshold", -15, 35),
+                      ("max-erb-processing-threshold", -15, 35),
+                      ("max-df-processing-threshold", -15, 35),
+                      ("min-processing-buffer", 0, 10),
+                      ("post-filter-beta", 0, 0.05)):
+        chk(lo <= cfg[k] <= hi, "%s: deepfilternet %s=%r 越界 [%g,%g]" % (name, k, cfg[k], lo, hi))
+
+
 def check_plugin(name, pid, cfg):
     base = pid.split("#")[0]
     if base == "equalizer":
@@ -146,6 +286,21 @@ def check_plugin(name, pid, cfg):
         chk(cfg["lpf-mode"] in FILTER_SLOPES, "%s: compressor lpf-mode %r" % (name, cfg["lpf-mode"]))
         chk(cfg["sidechain"]["type"] in COMP_SC_TYPES,
             "%s: compressor sidechain.type %r" % (name, cfg["sidechain"]["type"]))
+    elif base == "stereo_tools":
+        check_stereo_tools(name, cfg)
+    elif base == "crosstalk_canceller":
+        check_crosstalk_canceller(name, cfg)
+    elif base == "bass_enhancer":
+        check_bass_enhancer(name, cfg)
+    elif base == "limiter":
+        check_limiter(name, cfg)
+    elif base == "deepfilternet":
+        check_deepfilternet(name, cfg)
+
+    # 未知插件**必须报错**，不能静默放行 ——
+    # 否则新增插件时"全部通过"是假的（这正是本档案陷阱 1 的形态）。
+    chk(base in HANDLED_PLUGINS,
+        "%s: 插件 %r 没有校验规则 —— 请先补 HANDLED_PLUGINS 与对应检查" % (name, base))
 
 
 def main():

@@ -253,7 +253,7 @@ def main():
             ("wet", 0.0)])
 
         lm = OrderedDict(T_LM)
-        lm.update({"threshold": -1.0, "release": 100.0, "attack": 5.0,
+        lm.update({"threshold": -1.0, "release": 20.0, "attack": 5.0,   # release 合法上限为 20
                    "lookahead": 5.0, "oversampling": "True Peak/16 bit",
                    "mode": "Herm Thin", "stereo-link": 100.0, "alr": False,
                    "gain-boost": False, "dithering": "None", "bypass": False})

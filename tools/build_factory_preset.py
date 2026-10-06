@@ -127,7 +127,7 @@ def main():
         name = f"笔记本扬声器-Nahimic原厂-{tag}"
         out = OrderedDict()
         out["convolver#0"] = convolver(f"Nahimic-Factory-{tag}")
-        out["limiter#0"] = limiter(-1.0, 100.0)
+        out["limiter#0"] = limiter(-1.0, 20.0)   # release 合法上限为 20（kcfg 0.25…20）
         out["plugins_order"] = ["convolver#0", "limiter#0"]
         out["blocklist"] = []
         presets[name] = OrderedDict([("output", out)])
